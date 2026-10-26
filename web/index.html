@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>微信聊天记录智能检索</title>
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --line: #e3e2dd;
+    --text: #1f1f1d;
+    --muted: #6b6b64;
+    --accent: #185fa5;
+    --accent-soft: #e6f1fb;
+    --ok: #0f6e56;
+    --warn: #a32d2d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 28px 20px 60px; }
+  header h1 { font-size: 18px; font-weight: 500; margin: 0 0 4px; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  .tabs { display: flex; gap: 6px; margin: 20px 0 16px; }
+  .tabs button {
+    border: 1px solid var(--line); background: var(--surface); color: var(--muted);
+    padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  }
+  .tabs button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; padding: 18px; margin-bottom: 14px;
+  }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  input[type="text"] {
+    flex: 1; min-width: 220px; padding: 9px 12px; font-size: 14px;
+    border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--text);
+  }
+  input[type="text"]:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+  button.primary {
+    background: var(--accent); color: #fff; border: 0; padding: 9px 18px;
+    border-radius: 8px; cursor: pointer; font-size: 14px;
+  }
+  button.primary:disabled { opacity: .55; cursor: default; }
+  label.check { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  .hit { border-top: 1px solid var(--line); padding: 12px 0; }
+  .hit:first-of-type { border-top: 0; }
+  .hit .who { font-weight: 500; }
+  .hit .time { color: var(--muted); font-size: 12px; margin-left: 8px; }
+  .hit .body { margin-top: 4px; word-break: break-all; }
+  .hit mark { background: var(--accent-soft); color: var(--accent); border-radius: 3px; padding: 0 2px; }
+  .empty { color: var(--muted); padding: 10px 0; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+  .stat { background: var(--bg); border-radius: 8px; padding: 10px 12px; }
+  .stat span { display: block; color: var(--muted); font-size: 12px; }
+  .stat strong { font-size: 18px; font-weight: 500; }
+  .bar { height: 6px; background: var(--line); border-radius: 999px; overflow: hidden; margin-top: 12px; }
+  .bar i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+  pre.stream {
+    white-space: pre-wrap; word-break: break-word; margin: 0;
+    font-family: inherit; font-size: 13px; min-height: 120px;
+  }
+  .tag { display: inline-block; background: var(--bg); border-radius: 6px; padding: 1px 8px; font-size: 12px; color: var(--muted); margin-right: 6px; }
+  .error { color: var(--warn); font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="app" class="wrap">
+  <header>
+    <h1>微信聊天记录智能检索</h1>
+    <p>数据仅在本机处理，不上传、不持久化到服务端存储以外的位置。</p>
+  </header>
+
+  <div class="tabs">
+    <button :class="{active: tab === 'search'}" @click="tab = 'search'">检索</button>
+    <button :class="{active: tab === 'ingest'}" @click="tab = 'ingest'">解析建库</button>
+    <button :class="{active: tab === 'analyze'}" @click="tab = 'analyze'">分析</button>
+  </div>
+
+  <search-view v-show="tab === 'search'"></search-view>
+  <ingest-view v-show="tab === 'ingest'"></ingest-view>
+  <analyze-view v-show="tab === 'analyze'"></analyze-view>
+</div>
+
+<script src="/assets/vue.global.prod.js"></script>
+<script>
+const { createApp, ref, onMounted, nextTick } = Vue;
+
+const api = {
+  async get(url, params) {
+    const qs = params ? '?' + new URLSearchParams(params) : '';
+    const res = await fetch(url + qs);
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    return res.json();
+  },
+  async post(url, body) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    return res.json();
+  },
+};
+
+const SearchView = {
+  template: `
+    <div>
+      <div class="card">
+        <div class="row">
+          <input type="text" v-model="query" @keyup.enter="run" placeholder="输入关键词，例如：会议 / 天气 / 预算" />
+          <label class="check"><input type="checkbox" v-model="expand" /> 近义词扩展</label>
+          <button class="primary" :disabled="loading || !query.trim()" @click="run">{{ loading ? '检索中…' : '检索' }}</button>
+        </div>
+        <div class="meta" v-if="meta">
+          模式 {{ meta.mode }} · 命中 {{ meta.count }} 条
+          <span v-if="meta.terms.length > 1"> · 扩展词：{{ meta.terms.join(' / ') }}</span>
+        </div>
+        <div class="error" v-if="error">{{ error }}</div>
+      </div>
+      <div class="card">
+        <div v-if="!hits.length" class="empty">{{ meta ? '没有匹配的记录' : '输入关键词开始检索' }}</div>
+        <div class="hit" v-for="hit in hits" :key="hit.rowid">
+          <div><span class="who">{{ hit.talker }}</span><span class="time">{{ hit.created_at }}</span></div>
+          <div class="body" v-html="highlight(hit)"></div>
+        </div>
+      </div>
+    </div>`,
+  setup() {
+    const query = ref('');
+    const expand = ref(true);
+    const loading = ref(false);
+    const hits = ref([]);
+    const meta = ref(null);
+    const error = ref('');
+
+    function escapeHtml(text) {
+      return (text || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+    function highlight(hit) {
+      if (hit.snippet) {
+        return escapeHtml(hit.snippet).replace(/«/g, '<mark>').replace(/»/g, '</mark>');
+      }
+      return escapeHtml(hit.content);
+    }
+    async function run() {
+      loading.value = true;
+      error.value = '';
+      try {
+        const data = await api.get('/api/search', { q: query.value.trim(), limit: 50, expand: expand.value });
+        hits.value = data.hits;
+        meta.value = { mode: data.mode, count: data.count, terms: data.terms };
+      } catch (e) {
+        error.value = e.message;
+        hits.value = [];
+        meta.value = null;
+      } finally {
+        loading.value = false;
+      }
+    }
+    onMounted(() => {
+      const params = new URLSearchParams(location.search);
+      const q = params.get('q');
+      if (q) {
+        query.value = q;
+        if (params.get('expand') === '0') expand.value = false;
+        run();
+      }
+    });
+    return { query, expand, loading, hits, meta, error, run, highlight };
+  },
+};
+
+const IngestView = {
+  template: `
+    <div>
+      <div class="card">
+        <div class="row" style="justify-content: space-between;">
+          <div class="stats" style="flex:1;">
+            <div class="stat"><span>文本消息</span><strong>{{ stats.messages ?? '-' }}</strong></div>
+            <div class="stat"><span>待分词</span><strong>{{ stats.segmented_pending ?? '-' }}</strong></div>
+            <div class="stat"><span>待抽关键词</span><strong>{{ stats.keywords_pending ?? '-' }}</strong></div>
+            <div class="stat"><span>索引行数</span><strong>{{ stats.fts_rows ?? '-' }}</strong></div>
+          </div>
+        </div>
+        <div class="row" style="margin-top: 14px;">
+          <button class="primary" :disabled="running" @click="start">{{ running ? '处理中…' : '开始解析建库' }}</button>
+          <button class="primary" style="background:#fff;color:var(--accent);border:1px solid var(--accent);" @click="loadStats">刷新状态</button>
+          <span class="meta" v-if="task">{{ task.status }} · {{ task.percent ?? 0 }}%<span v-if="task.done">（{{ task.done }}/{{ task.total }}）</span></span>
+        </div>
+        <div class="bar" v-if="running || (task && task.percent < 100)"><i :style="{width: (task?.percent || 0) + '%'}"></i></div>
+        <div class="meta" v-if="result">分词 {{ result.segmented }} 条 · 关键词 {{ result.keywords }} 条 · 索引 {{ result.indexed }} 行 · 耗时 {{ result.elapsed_ms }} ms</div>
+        <div class="error" v-if="error">{{ error }}</div>
+      </div>
+      <div class="card">
+        <div class="meta" style="margin-top:0">
+          解析是长任务：提交后返回 task_id，前端轮询状态，避免一个 HTTP 请求跑几分钟被超时掐断。
+        </div>
+      </div>
+    </div>`,
+  setup() {
+    const stats = ref({});
+    const task = ref(null);
+    const running = ref(false);
+    const error = ref('');
+    const result = ref(null);
+    let timer = null;
+
+    async function loadStats() {
+      try { stats.value = await api.get('/api/stats'); } catch (e) { error.value = e.message; }
+    }
+    async function poll(id) {
+      try {
+        const state = await api.get('/api/tasks/' + id);
+        task.value = state;
+        if (state.status === 'success') {
+          running.value = false;
+          result.value = state.result;
+          clearInterval(timer);
+          loadStats();
+        } else if (state.status === 'failed') {
+          running.value = false;
+          error.value = state.error || '任务失败';
+          clearInterval(timer);
+        }
+      } catch (e) {
+        error.value = e.message;
+        running.value = false;
+        clearInterval(timer);
+      }
+    }
+    async function start() {
+      error.value = '';
+      result.value = null;
+      running.value = true;
+      try {
+        const created = await api.post('/api/tasks', { kind: 'pipeline' });
+        timer = setInterval(() => poll(created.task_id), 800);
+      } catch (e) {
+        error.value = e.message;
+        running.value = false;
+      }
+    }
+    onMounted(loadStats);
+    return { stats, task, running, error, result, start, loadStats };
+  },
+};
+
+const AnalyzeView = {
+  template: `
+    <div>
+      <div class="card">
+        <div class="row">
+          <button class="primary" :disabled="streaming" @click="run">{{ streaming ? '生成中…' : '生成分析摘要' }}</button>
+          <span class="tag">SSE 流式</span>
+          <span class="meta" style="margin:0">{{ status }}</span>
+        </div>
+        <div class="error" v-if="error">{{ error }}</div>
+      </div>
+      <div class="card"><pre class="stream" ref="box">{{ text || '点击上方按钮，服务端会以事件流的形式逐块返回结果。' }}</pre></div>
+    </div>`,
+  setup() {
+    const text = ref('');
+    const status = ref('');
+    const error = ref('');
+    const streaming = ref(false);
+    const box = ref(null);
+    let source = null;
+
+    function run() {
+      if (source) source.close();
+      text.value = '';
+      error.value = '';
+      streaming.value = true;
+      status.value = '已连接';
+      source = new EventSource('/api/analyze?delay=0.05');
+      source.addEventListener('chunk', (event) => {
+        const payload = JSON.parse(event.data);
+        text.value += payload.text;
+        nextTick(() => { if (box.value) box.value.scrollTop = box.value.scrollHeight; });
+      });
+      source.addEventListener('done', () => {
+        status.value = '完成';
+        streaming.value = false;
+        source.close();
+      });
+      source.addEventListener('error', (event) => {
+        try { error.value = JSON.parse(event.data).message; } catch (_) { error.value = '连接中断'; }
+        status.value = '失败';
+        streaming.value = false;
+        source.close();
+      });
+    }
+    return { text, status, error, streaming, run, box };
+  },
+};
+
+createApp({
+  components: { SearchView, IngestView, AnalyzeView },
+  setup() {
+    const tab = ref('search');
+    return { tab };
+  },
+}).mount('#app');
+</script>
+</body>
+</html>
