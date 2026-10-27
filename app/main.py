@@ -19,7 +19,13 @@ from app.core.logging import get_logger
 
 log = get_logger(__name__)
 settings = get_settings()
-WEB_DIR = BASE_DIR / "web"
+
+# 前端两套产物，优先用 Vite 构建版：
+#   frontend/dist  —— npm run build 产物（runtime-only，体积小）
+#   web/           —— 重构前的单文件版，未构建时的兜底，克隆即可跑
+LEGACY_WEB_DIR = BASE_DIR / "web"
+DIST_DIR = BASE_DIR / "frontend" / "dist"
+WEB_DIR = DIST_DIR if (DIST_DIR / "index.html").exists() else LEGACY_WEB_DIR
 
 app = FastAPI(title="微信聊天记录智能检索", version=__version__)
 
@@ -42,11 +48,14 @@ def health():
         "version": __version__,
         "db_path": str(settings.db_path),
         "db_exists": settings.db_path.exists(),
+        "web_dir": WEB_DIR.name if WEB_DIR.exists() else None,
+        "frontend": "vite" if WEB_DIR == DIST_DIR else "legacy",
     }
 
 
 if WEB_DIR.exists():
-    app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
+    if (WEB_DIR / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 
     @app.get("/")
     def index():

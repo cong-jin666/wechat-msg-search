@@ -13,21 +13,35 @@ FastAPI 提供 REST + SSE 接口，SQLite FTS5 做全文索引，jieba 分词 + 
 ## 三步跑起来
 
 ```bash
-# 1. 安装依赖（Python 3.11+）
+# 1. 安装后端依赖（Python 3.11+）
 python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt     # Linux/macOS: .venv/bin/pip
 
-# 2. 准备数据（二选一）
+# 2. 前端构建（推荐，需要 Node 18+；跳过则自动回退到 web/ 单文件版）
+cd frontend && npm install && npm run build && cd ..
+
+# 3. 准备数据（二选一）
 .venv/Scripts/python -m tools.make_demo_db --rows 20000   # 生成脱敏演示库
 # 或把微信导出的 de_MSG0.db 放到 data/ 下（结构对齐 PyWxDump 导出的 MSG 表）
 
-# 3. 建索引 + 启动
+# 4. 建索引 + 启动
 .venv/Scripts/python -m app.cli pipeline
 .venv/Scripts/python -m app.cli serve          # 打开 http://127.0.0.1:8000
 ```
 
 也可以直接指定数据库：`python -m app.cli --db D:/path/de_MSG0.db pipeline`，
 或设置环境变量 `WCM_DB_PATH`（见 `.env.example`）。
+
+### 前端开发模式
+
+```bash
+cd frontend
+npm run dev        # http://localhost:5173，/api 自动代理到 127.0.0.1:8000
+```
+
+改代码热更新（HMR）；`npm run build` 产物输出到 `frontend/dist`，由 FastAPI 直接托管。
+后端优先用 `frontend/dist`，不存在时回退 `web/` 的单文件版（`/api/health` 的
+`frontend` 字段标识当前用的是哪套）。
 
 ## 功能一览
 
@@ -56,7 +70,13 @@ app/
 ├── db/           # schema.sql（FTS5 + 触发器）+ repo.py（全部参数化 SQL）
 ├── core/         # 配置（pydantic-settings，.env）+ 日志
 └── cli.py        # 命令行入口
-web/              # Vue 3（本地 vendored，无构建步骤）
+frontend/         # Vite + Vue 3 SFC
+└── src/
+    ├── components/   # SearchView / IngestView / AnalyzeView
+    ├── composables/  # useSearch（可取消）/ useTaskPolling（指数退避）/ useSSE
+    ├── api/          # fetch 封装，错误归一化 + AbortSignal
+    └── utils/        # 高亮渲染（转义 → 哨兵还原）
+web/              # 重构前的单文件版（未构建时的兜底）
 tests/            # pytest：分词 / 增量 / 检索 / SQL 注入 / API / SSE
 tools/            # 演示数据生成 + 性能压测
 ```
@@ -85,7 +105,9 @@ tools/            # 演示数据生成 + 性能压测
 - **批量**：`rowid` 定位 + `executemany` + 分批事务（旧实现按 StrTalker+StrContent 逐行更新，N² 全表扫描）;
 - **安全**：SQL 全部参数化；FTS5 查询串对词做引号包裹 + 操作符字符清洗，用户输入进不了查询语法；
 - **索引同步**：FTS5 虚表 + AFTER INSERT/UPDATE/DELETE 触发器，`app.cli index` 可全量重建兜底；
-- **长任务**：解析不能塞在一个 HTTP 请求里跑，任务表 + 进度回调 + 轮询，接口契约不变的前提下可平滑换 Redis。
+- **长任务**：解析不能塞在一个 HTTP 请求里跑，任务表 + 进度回调 + 轮询，接口契约不变的前提下可平滑换 Redis；
+- **前端**：SFC + composables 分层；检索请求带 AbortController + 序号守卫（迟到响应直接丢弃）；
+  轮询按指数退避（800ms → 4s）且容忍瞬时失败；事件流断连由 EventSource 内置重连兜底。
 
 ## 测试
 
@@ -99,7 +121,7 @@ tools/            # 演示数据生成 + 性能压测
 - [x] P1 分层：services / db / core / api / cli，配置外置，requirements
 - [x] P2 FTS5 索引 + 增量管道 + 压测基线
 - [x] P3 Web：FastAPI 三接口 + 任务轮询 + SSE + Vue 3 单页
-- [ ] P3-b Vue 3 + Vite 多文件工程化（当前为单文件 + 本地 vendored Vue 运行时）
+- [x] P3-b 前端工程化：Vite + SFC 拆分 + composables，构建产物由 FastAPI 托管（单文件版保留为兜底）
 - [ ] P4 语义检索：bge-small-zh + FAISS 双路召回；LLM 摘要接入 `services/analyze.py` 预留点
 - [ ] 图片检索：旧实验脚本待 CLIP 方案重做或移除
 
